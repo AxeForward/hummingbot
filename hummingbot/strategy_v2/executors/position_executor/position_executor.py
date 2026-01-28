@@ -480,10 +480,17 @@ class PositionExecutor(ExecutorBase):
         """
         self.cancel_open_orders()
         if self.amount_to_close >= self.trading_rules.min_order_size and close_type != CloseType.POSITION_HOLD:
+            order_type = OrderType.MARKET
+            if close_type == CloseType.EARLY_STOP:
+                order_type = self.config.triple_barrier_config.early_stop_order_type
+            
+            if order_type.is_limit_type() and price.is_nan():
+                price = self.get_price(self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)
+
             order_id = self.place_order(
                 connector_name=self.config.connector_name,
                 trading_pair=self.config.trading_pair,
-                order_type=OrderType.MARKET,
+                order_type=order_type,
                 amount=self.amount_to_close,
                 price=price,
                 side=self.close_order_side,

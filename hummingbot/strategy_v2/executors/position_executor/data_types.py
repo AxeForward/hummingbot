@@ -23,6 +23,7 @@ class TripleBarrierConfig(BaseModel):
     take_profit_order_type: OrderType = OrderType.MARKET
     stop_loss_order_type: OrderType = OrderType.MARKET
     time_limit_order_type: OrderType = OrderType.MARKET
+    early_stop_order_type: OrderType = OrderType.MARKET
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def new_instance_with_adjusted_volatility(self, volatility_factor: float) -> TripleBarrierConfig:
@@ -41,7 +42,8 @@ class TripleBarrierConfig(BaseModel):
             open_order_type=self.open_order_type,
             take_profit_order_type=self.take_profit_order_type,
             stop_loss_order_type=self.stop_loss_order_type,
-            time_limit_order_type=self.time_limit_order_type
+            time_limit_order_type=self.time_limit_order_type,
+            early_stop_order_type=self.early_stop_order_type
         )
 
 
