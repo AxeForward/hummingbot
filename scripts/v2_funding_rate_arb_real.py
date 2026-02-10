@@ -1,6 +1,6 @@
 import os
 from decimal import Decimal
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 import pandas as pd
 from pydantic import Field, field_validator
@@ -76,6 +76,7 @@ class FundingRateArbitrageConfig(StrategyV2ConfigBase):
 
 
 class FundingRateArbitrage(StrategyV2Base):
+    markets: Dict[str, Set[str]] = {}
     quote_markets_map = {
         "hyperliquid_perpetual": "USD",
         "binance_perpetual": "USDT",
@@ -100,11 +101,11 @@ class FundingRateArbitrage(StrategyV2Base):
             markets[connector] = trading_pairs
         cls.markets = markets
 
-    def __init__(self, connectors: Dict[str, ConnectorBase], config: FundingRateArbitrageConfig):
+    def __init__(self, connectors: Dict[str, ConnectorBase], config: Optional[FundingRateArbitrageConfig] = None):
         super().__init__(connectors, config)
         self.config = config
         self.active_funding_arbitrages = {}
-        self.stopped_funding_arbitrages = {token: [] for token in self.config.tokens}
+        self.stopped_funding_arbitrages = {token: [] for token in self.config.tokens} if config else {}
 
     def start(self, clock: Clock, timestamp: float) -> None:
         """
