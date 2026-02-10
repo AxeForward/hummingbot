@@ -40,10 +40,10 @@ class ParadexPerpetualConfigMap(BaseConnectorConfigMap):
         )
     )
     paradex_perpetual_is_testnet: bool = Field(
-        default="testing this", 
+        default=False,
         client_data=ClientFieldData(
-            prompt=lambda cm: "is_testnet",
-            is_secure=True,
+            prompt=lambda cm: "Use testnet? (True/False)",
+            is_secure=False,
             is_connect_key=True,
             prompt_on_new=True,
         )

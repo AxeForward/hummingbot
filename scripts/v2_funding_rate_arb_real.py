@@ -78,11 +78,13 @@ class FundingRateArbitrageConfig(StrategyV2ConfigBase):
 class FundingRateArbitrage(StrategyV2Base):
     quote_markets_map = {
         "hyperliquid_perpetual": "USD",
-        "binance_perpetual": "USDT"
+        "binance_perpetual": "USDT",
+        "paradex_perpetual": "USD",
     }
     funding_payment_interval_map = {
         "binance_perpetual": 60 * 60 * 8,
-        "hyperliquid_perpetual": 60 * 60 * 1
+        "hyperliquid_perpetual": 60 * 60 * 1,
+        "paradex_perpetual": 60 * 60 * 8,  # Paradex uses 8-hour funding intervals
     }
     funding_profitability_interval = 60 * 60 * 24
 
@@ -113,10 +115,12 @@ class FundingRateArbitrage(StrategyV2Base):
         self._last_timestamp = timestamp
         self.apply_initial_setting()
 
+    ONEWAY_ONLY_CONNECTORS = {"hyperliquid_perpetual", "paradex_perpetual"}
+
     def apply_initial_setting(self):
         for connector_name, connector in self.connectors.items():
             if self.is_perpetual(connector_name):
-                position_mode = PositionMode.ONEWAY if connector_name == "hyperliquid_perpetual" else PositionMode.HEDGE
+                position_mode = PositionMode.ONEWAY if connector_name in self.ONEWAY_ONLY_CONNECTORS else PositionMode.HEDGE
                 connector.set_position_mode(position_mode)
                 for trading_pair in self.market_data_provider.get_trading_pairs(connector_name):
                     connector.set_leverage(trading_pair, self.config.leverage)

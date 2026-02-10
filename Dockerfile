@@ -37,6 +37,9 @@ RUN python3 setup.py build_ext --inplace -j 8 && \
     rm -rf build/ && \
     find . -type f -name "*.cpp" -delete
 
+# Fix Windows CRLF line endings in scripts
+RUN find ./bin -type f -exec sed -i 's/\r$//' {} \;
+
 
 # Build final image using artifacts from builder
 FROM continuumio/miniconda3:latest AS release
