@@ -63,7 +63,7 @@ class ParadexPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
         ws: WSAssistant = await self._get_ws_assistant()
         url = f"{web_utils.wss_url(self._domain)}"
         extra_headers = {
-            "Authorization": f"Bearer {self._auth.paradex_account.jwt_token}"
+            "Authorization": f"Bearer {self._auth.jwt_token}"
         }
         await ws.connect(ws_url=url, ping_timeout=self.HEARTBEAT_TIME_INTERVAL, ws_headers=extra_headers)
         
@@ -71,7 +71,7 @@ class ParadexPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
             "id": int(time.time() * 1_000_000),
             "jsonrpc": "2.0",
             "method": "auth",
-            "params": {"bearer": self._auth.paradex_account.jwt_token}
+            "params": {"bearer": self._auth.jwt_token}
         }
 
         auth_id_req = WSJSONRequest(payload=auth_payload)

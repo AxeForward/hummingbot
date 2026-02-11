@@ -721,11 +721,10 @@ class ParadexPerpetualDerivative(PerpetualDerivativePyBase):
 
         response = await self._api_get(path_url=CONSTANTS.TICKER_PRICE_CHANGE_URL,
                                         data={"market": exchange_symbol})
-        price = 0
-        for index, i in enumerate(response[0]['universe']):
-            if i['name'] == 'coin':
-                price = float(response[1][index]['markPx'])
-        return price
+        results = response.get("results", [])
+        if results:
+            return float(results[0].get("mark_price", 0))
+        return 0.0
 
     def _resolve_trading_pair_symbols_duplicate(self, mapping: bidict, new_exchange_symbol: str, base: str, quote: str):
         """Resolves name conflicts provoked by futures contracts.

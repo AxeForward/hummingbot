@@ -41,19 +41,27 @@ class ParadexPerpetualAuth(AuthBase):
             env = self._paradex_perpetual_chain
 
             self._rest_api_client = ParadexApiClient(
-                env=env, 
+                env=env,
                 logger=None
             )
             self.config = self._rest_api_client.fetch_system_config()
-            self._paradex_account = ParadexAccount(    
+            self._paradex_account = ParadexAccount(
                 config=self.config,
-                l1_address=self._paradex_perpetual_l1_address, 
+                l1_address=self._paradex_perpetual_l1_address,
                 l1_private_key=self._paradex_perpetual_l1_private_key,
                 l2_private_key=self._paradex_perpetual_l2_private_key
             )
 
             self._rest_api_client.init_account(self._paradex_account)
         return self._rest_api_client
+
+    @property
+    def jwt_token(self):
+        """Get JWT token from the authenticated rest client headers."""
+        auth_header = self.paradex_rest_client.client.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            return auth_header[7:]
+        return ""
 
     async def rest_authenticate(self, request: RESTRequest) -> RESTRequest:
         self.paradex_rest_client._validate_auth()

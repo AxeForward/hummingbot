@@ -230,3 +230,89 @@ class ParadexPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
         Funding premium is updated every 5 seconds as mentioned in https://docs.paradex.trade/risk-system/funding-mechanism
         """
         return time.time() + 5
+
+    async def subscribe_to_trading_pair(self, trading_pair: str) -> bool:
+        """
+        Subscribes to order book and trade channels for a single trading pair on an
+        existing WebSocket connection.
+
+        :param trading_pair: the trading pair to subscribe to
+        :return: True if subscription was successful, False otherwise
+        """
+        if self._ws_assistant is None:
+            self.logger().warning(
+                f"Cannot subscribe to {trading_pair}: WebSocket connection not established."
+            )
+            return False
+
+        try:
+            symbol = await self._connector.exchange_symbol_associated_to_pair(trading_pair=trading_pair)
+
+            trades_payload = {
+                "id": int(time.time() * 1_000_000),
+                "jsonrpc": "2.0",
+                "method": "subscribe",
+                "params": {"channel": CONSTANTS.TRADES_ENDPOINT_NAME.format(market=symbol)},
+            }
+            order_book_payload = {
+                "id": int(time.time() * 1_000_000),
+                "jsonrpc": "2.0",
+                "method": "subscribe",
+                "params": {"channel": CONSTANTS.DEPTH_ENDPOINT_NAME.format(market=symbol)},
+            }
+
+            await self._ws_assistant.send(WSJSONRequest(payload=trades_payload))
+            await self._ws_assistant.send(WSJSONRequest(payload=order_book_payload))
+
+            self.add_trading_pair(trading_pair)
+            self.logger().info(f"Successfully subscribed to {trading_pair}")
+            return True
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self.logger().error(f"Error subscribing to {trading_pair}: {e}")
+            return False
+
+    async def unsubscribe_from_trading_pair(self, trading_pair: str) -> bool:
+        """
+        Unsubscribes from order book and trade channels for a single trading pair on an
+        existing WebSocket connection.
+
+        :param trading_pair: the trading pair to unsubscribe from
+        :return: True if unsubscription was successful, False otherwise
+        """
+        if self._ws_assistant is None:
+            self.logger().warning(
+                f"Cannot unsubscribe from {trading_pair}: WebSocket connection not established."
+            )
+            return False
+
+        try:
+            symbol = await self._connector.exchange_symbol_associated_to_pair(trading_pair=trading_pair)
+
+            trades_payload = {
+                "id": int(time.time() * 1_000_000),
+                "jsonrpc": "2.0",
+                "method": "unsubscribe",
+                "params": {"channel": CONSTANTS.TRADES_ENDPOINT_NAME.format(market=symbol)},
+            }
+            order_book_payload = {
+                "id": int(time.time() * 1_000_000),
+                "jsonrpc": "2.0",
+                "method": "unsubscribe",
+                "params": {"channel": CONSTANTS.DEPTH_ENDPOINT_NAME.format(market=symbol)},
+            }
+
+            await self._ws_assistant.send(WSJSONRequest(payload=trades_payload))
+            await self._ws_assistant.send(WSJSONRequest(payload=order_book_payload))
+
+            self.remove_trading_pair(trading_pair)
+            self.logger().info(f"Successfully unsubscribed from {trading_pair}")
+            return True
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self.logger().error(f"Error unsubscribing from {trading_pair}: {e}")
+            return False

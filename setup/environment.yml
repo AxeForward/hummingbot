@@ -64,4 +64,4 @@ dependencies:
   - zlib>=1.2.13
   - pip:
     - injective-py==1.12.*
-    - paradex-py
+    - paradex_py>=0.5.4
