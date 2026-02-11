@@ -49,8 +49,8 @@ class ParadexPerpetualAuth(AuthBase):
             self._paradex_account = ParadexAccount(
                 config=self.config,
                 l1_address=self._paradex_perpetual_l1_address,
-                l1_private_key=self._paradex_perpetual_l1_private_key,
-                l2_private_key=self._paradex_perpetual_l2_private_key
+                l1_private_key=self._paradex_perpetual_l1_private_key or None,
+                l2_private_key=self._paradex_perpetual_l2_private_key or None
             )
 
             try:

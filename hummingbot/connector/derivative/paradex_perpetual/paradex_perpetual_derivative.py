@@ -761,7 +761,7 @@ class ParadexPerpetualDerivative(PerpetualDerivativePyBase):
         coll_quote = CONSTANTS.CURRENCY
         algo_quote = "USD"
         _balances_map = {x['token']: x['size'] for x in balance_info['results']}
-        self._account_balances[algo_quote] = Decimal(_balances_map[coll_quote])
+        self._account_balances[algo_quote] = Decimal(_balances_map.get(coll_quote, "0"))
         self._account_available_balances[algo_quote] = Decimal(account_info['free_collateral'])
 
     async def _update_positions(self):
