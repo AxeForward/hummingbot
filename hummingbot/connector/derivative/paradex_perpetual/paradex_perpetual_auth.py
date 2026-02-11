@@ -1,12 +1,13 @@
-import os
+import logging
 from typing import Optional
 
-from paradex_py import Paradex
 from paradex_py.account.account import ParadexAccount
 from paradex_py.api.api_client import ParadexApiClient
-from paradex_py.environment import PROD, TESTNET, Environment
+from paradex_py.environment import PROD, TESTNET
 from hummingbot.core.web_assistant.auth import AuthBase
 from hummingbot.core.web_assistant.connections.data_types import RESTRequest, WSRequest
+
+logger = logging.getLogger(__name__)
 
 
 class ParadexPerpetualAuth(AuthBase):
@@ -52,7 +53,29 @@ class ParadexPerpetualAuth(AuthBase):
                 l2_private_key=self._paradex_perpetual_l2_private_key
             )
 
-            self._rest_api_client.init_account(self._paradex_account)
+            try:
+                self._rest_api_client.init_account(self._paradex_account)
+            except Exception as e:
+                if "NOT_ONBOARDED" in str(e).upper():
+                    if self._paradex_perpetual_l1_private_key:
+                        logger.info("Paradex account not onboarded. Calling onboarding endpoint...")
+                        try:
+                            self._rest_api_client.onboarding()
+                        except Exception as onboard_err:
+                            if "PARENT_ADDRESS_ALREADY_ONBOARDED" in str(onboard_err).upper():
+                                raise ValueError(
+                                    "Your L1 address is already registered on Paradex with a different L2 account. "
+                                    "Make sure the L2 private key matches the one used when you first onboarded. "
+                                    "Leave the L2 private key empty to auto-derive it from your L1 private key."
+                                ) from onboard_err
+                            raise
+                        self._rest_api_client.init_account(self._paradex_account)
+                    else:
+                        logger.error("Paradex account is not onboarded and no L1 private key was provided to onboard.")
+                        raise
+                else:
+                    raise
+
         return self._rest_api_client
 
     @property
