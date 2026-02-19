@@ -674,10 +674,10 @@ class ParadexPerpetualDerivative(PerpetualDerivativePyBase):
         """
         # rules: list = exchange_info_dict[0]
         self.coin_to_asset = {asset["symbol"]: asset for asset in
-                              exchange_info_dict['results']}
+                              filter(web_utils.is_exchange_information_valid, exchange_info_dict['results'])}
 
         return_val: list = []
-        for asset_info in exchange_info_dict['results']:
+        for asset_info in filter(web_utils.is_exchange_information_valid, exchange_info_dict['results']):
             try:
                 ex_symbol = asset_info["symbol"]
                 trading_pair = await self.trading_pair_associated_to_exchange_symbol(symbol=ex_symbol)
@@ -699,8 +699,7 @@ class ParadexPerpetualDerivative(PerpetualDerivativePyBase):
                     )
                 )
             except Exception:
-                self.logger().error(f"Error parsing the trading pair rule {exchange_info_dict}. Skipping.",
-                                    exc_info=True)
+                self.logger().debug(f"Skipping trading rule for untracked symbol: {ex_symbol}")
         return return_val
 
     def _initialize_trading_pair_symbols_from_exchange_info(self, exchange_info: List):

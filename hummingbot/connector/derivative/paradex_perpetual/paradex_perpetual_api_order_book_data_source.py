@@ -1,6 +1,7 @@
 import asyncio
 import time
 from collections import defaultdict
+import decimal
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 
@@ -52,11 +53,11 @@ class ParadexPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
 
         funding_event = response['results'][0]
 
-        # Use the normalized 8-hour funding rate from the API.
-        # The raw 'funding_rate' may differ if the actual funding period != 8h.
-        funding_rate_8h = Decimal(str(
-            funding_event.get('funding_rate_8h', funding_event.get('funding_rate', '0'))
-        ))
+        # funding_rate is per-8h by Paradex definition (continuous accrual over 8h).
+        try:
+            funding_rate_8h = Decimal(str(funding_event['funding_rate']))
+        except (KeyError, decimal.InvalidOperation) as e:
+            raise ValueError(f"Invalid funding_rate in response: {funding_event}") from e
 
         funding_info = FundingInfo(
             trading_pair=trading_pair,
@@ -209,9 +210,10 @@ class ParadexPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
         data = raw_message["params"]["data"]
         market = data["market"]
         trading_pair = await self._connector.trading_pair_associated_to_exchange_symbol(market)
-        funding_rate_8h = Decimal(str(
-            data.get('funding_rate_8h', data.get('funding_rate', '0'))
-        ))
+        try:
+            funding_rate_8h = Decimal(str(data['funding_rate']))
+        except (KeyError, decimal.InvalidOperation) as e:
+            raise ValueError(f"Invalid funding_rate in ws message: {data}") from e
         funding_info_update = FundingInfoUpdate(
             trading_pair=trading_pair,
             index_price=None,

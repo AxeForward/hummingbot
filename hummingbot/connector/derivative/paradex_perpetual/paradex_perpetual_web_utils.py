@@ -122,4 +122,4 @@ def is_exchange_information_valid(rule: Dict[str, Any]) -> bool:
 
     :return: True if the trading pair is enabled, False otherwise
     """
-    return True
+    return rule.get("asset_kind") == "PERP"

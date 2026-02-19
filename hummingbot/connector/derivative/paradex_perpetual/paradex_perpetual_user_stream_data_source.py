@@ -165,6 +165,8 @@ class ParadexPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
             _channel = _data.get("channel")
             
             if _channel is None:
+                if "id" in event_message and "result" in event_message:
+                    return
                 self.logger().warning(f"None channel {event_message}")
                 return
             
