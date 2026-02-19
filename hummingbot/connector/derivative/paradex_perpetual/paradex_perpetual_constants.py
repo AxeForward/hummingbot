@@ -36,6 +36,7 @@ ORDER_URL = "/orders/by_client_id/{client_id}"
 
 TRADES_ENDPOINT_NAME = "trades.{market}"
 DEPTH_ENDPOINT_NAME = "order_book.{market}.snapshot@15@100ms"
+FUNDING_DATA_ENDPOINT_NAME = "funding_data.{market}"
 
 USER_ORDERS_ENDPOINT_NAME = "orders.{market}"
 USER_FILLS_ENDPOINT_NAME = "fills.{market}"

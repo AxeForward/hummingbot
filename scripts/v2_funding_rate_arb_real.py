@@ -60,6 +60,12 @@ class FundingRateArbitrageConfig(StrategyV2ConfigBase):
             "prompt": lambda mi: "Enter the funding rate difference to stop the position (e.g. -0.001): ",
             "prompt_on_new": True}
     )
+    panic_loss_pct: Decimal = Field(
+        default=Decimal("0.75"),
+        json_schema_extra={
+            "prompt": lambda mi: "Enter the panic loss percentage of margin to force close (e.g. 0.75 for 75%): ",
+            "prompt_on_new": True}
+    )
     trade_profitability_condition_to_enter: bool = Field(
         default=False,
         json_schema_extra={
@@ -82,12 +88,12 @@ class FundingRateArbitrage(StrategyV2Base):
         "binance_perpetual": "USDT",
         "paradex_perpetual": "USD",
     }
-    funding_payment_interval_map = {
-        "binance_perpetual": 60 * 60 * 8,
-        "hyperliquid_perpetual": 60 * 60 * 1,
-        "paradex_perpetual": 60 * 60 * 8,  # Paradex uses 8-hour funding intervals
+    funding_payment_interval_hours = {
+        "binance_perpetual": 8,
+        "hyperliquid_perpetual": 1,
+        "paradex_perpetual": 8,
     }
-    funding_profitability_interval = 60 * 60 * 24
+    funding_profitability_interval_hours = 24
 
     @classmethod
     def get_trading_pair_for_connector(cls, token, connector):
@@ -189,17 +195,18 @@ class FundingRateArbitrage(StrategyV2Base):
         for connector_1 in funding_info_report:
             for connector_2 in funding_info_report:
                 if connector_1 != connector_2:
-                    rate_connector_1 = self.get_normalized_funding_rate_in_seconds(funding_info_report, connector_1)
-                    rate_connector_2 = self.get_normalized_funding_rate_in_seconds(funding_info_report, connector_2)
-                    funding_rate_diff = abs(rate_connector_1 - rate_connector_2) * self.funding_profitability_interval
+                    rate_connector_1 = self.get_hourly_funding_rate(funding_info_report, connector_1)
+                    rate_connector_2 = self.get_hourly_funding_rate(funding_info_report, connector_2)
+                    funding_rate_diff = abs(rate_connector_1 - rate_connector_2) * self.funding_profitability_interval_hours
                     if funding_rate_diff > highest_profitability:
                         trade_side = TradeType.BUY if rate_connector_1 < rate_connector_2 else TradeType.SELL
                         highest_profitability = funding_rate_diff
                         best_combination = (connector_1, connector_2, trade_side, funding_rate_diff)
         return best_combination
+    
 
-    def get_normalized_funding_rate_in_seconds(self, funding_info_report, connector_name):
-        return funding_info_report[connector_name].rate / self.funding_payment_interval_map.get(connector_name, 60 * 60 * 8)
+    def get_hourly_funding_rate(self, funding_info_report, connector_name):
+        return funding_info_report[connector_name].rate / self.funding_payment_interval_hours.get(connector_name, 8)
 
     def validate_trading_rules(self, connector_name, trading_pair, amount, price):
         connector = self.connectors[connector_name]
@@ -222,11 +229,29 @@ class FundingRateArbitrage(StrategyV2Base):
         and if one gets filled buy market the other one to improve the entry prices.
         """
         create_actions = []
+        # Pre-check: ensure all connectors have loaded their available balance
+        for connector_name in self.config.connectors:
+            quote = self.quote_markets_map.get(connector_name, "USD")
+            available = self.connectors[connector_name].get_available_balance(quote)
+            if available <= Decimal("0"):
+                self.logger().warning(
+                    f"{connector_name} available balance is {available} {quote}. "
+                    f"Waiting for balance to load...")
+                return create_actions
+
         for token in self.config.tokens:
             if token not in self.active_funding_arbitrages:
                 funding_info_report = self.get_funding_info_by_token(token)
                 best_combination = self.get_most_profitable_combination(funding_info_report)
                 connector_1, connector_2, trade_side, expected_profitability = best_combination
+
+                # Sanity check: funding rate profitability should be a reasonable value (< 100%)
+                if expected_profitability > Decimal("1"):
+                    self.logger().warning(
+                        f"Funding rate profitability for {token} is {expected_profitability} "
+                        f"(>100%), likely a data error. Skipping...")
+                    continue
+
                 if expected_profitability >= self.config.min_funding_rate_profitability:
                     # Check Trading Rules and Min Notional
                     # Calculate estimated prices and amounts
@@ -235,7 +260,7 @@ class FundingRateArbitrage(StrategyV2Base):
                     price_1 = self.market_data_provider.get_price_by_type(connector_1, trading_pair_1, PriceType.MidPrice)
                     price_2 = self.market_data_provider.get_price_by_type(connector_2, trading_pair_2, PriceType.MidPrice)
                     amount_1 = self.config.position_size_quote / price_1
-                    amount_2 = self.config.position_size_quote / price_2 # Note: amount might differ slightly if prices differ
+                    amount_2 = self.config.position_size_quote / price_2
 
                     valid_1, msg_1 = self.validate_trading_rules(connector_1, trading_pair_1, amount_1, price_1)
                     valid_2, msg_2 = self.validate_trading_rules(connector_2, trading_pair_2, amount_2, price_2)
@@ -288,12 +313,12 @@ class FundingRateArbitrage(StrategyV2Base):
             panic_triggered = False
             for executor in executors:
                 # net_pnl_pct is based on position size. Multiply by leverage to get % of margin.
-                if executor.net_pnl_pct * executor.config.leverage <= Decimal("-0.75"):
+                if executor.net_pnl_pct * executor.config.leverage <= -self.config.panic_loss_pct:
                     panic_triggered = True
                     break
-            
+
             if panic_triggered:
-                self.logger().warning(f"Panic condition met for {token}: Lost >75% margin. "
+                self.logger().warning(f"Panic condition met for {token}: Lost >{self.config.panic_loss_pct * 100}% margin. "
                                       f"Force closing ALL positions with MARKET orders.")
                 self.stopped_funding_arbitrages[token].append(funding_arbitrage_info)
                 for executor in executors:
@@ -306,10 +331,10 @@ class FundingRateArbitrage(StrategyV2Base):
             take_profit_condition = executors_pnl + funding_payments_pnl > self.config.profitability_to_take_profit * self.config.position_size_quote
             funding_info_report = self.get_funding_info_by_token(token)
             if funding_arbitrage_info["side"] == TradeType.BUY:
-                funding_rate_diff = self.get_normalized_funding_rate_in_seconds(funding_info_report, funding_arbitrage_info["connector_2"]) - self.get_normalized_funding_rate_in_seconds(funding_info_report, funding_arbitrage_info["connector_1"])
+                funding_rate_diff = self.get_hourly_funding_rate(funding_info_report, funding_arbitrage_info["connector_2"]) - self.get_hourly_funding_rate(funding_info_report, funding_arbitrage_info["connector_1"])
             else:
-                funding_rate_diff = self.get_normalized_funding_rate_in_seconds(funding_info_report, funding_arbitrage_info["connector_1"]) - self.get_normalized_funding_rate_in_seconds(funding_info_report, funding_arbitrage_info["connector_2"])
-            current_funding_condition = funding_rate_diff * self.funding_profitability_interval < self.config.funding_rate_diff_stop_loss
+                funding_rate_diff = self.get_hourly_funding_rate(funding_info_report, funding_arbitrage_info["connector_1"]) - self.get_hourly_funding_rate(funding_info_report, funding_arbitrage_info["connector_2"])
+            current_funding_condition = funding_rate_diff * self.funding_profitability_interval_hours < self.config.funding_rate_diff_stop_loss
             if take_profit_condition:
                 self.logger().info("Take profit profitability reached, stopping executors")
                 self.stopped_funding_arbitrages[token].append(funding_arbitrage_info)
@@ -345,7 +370,7 @@ class FundingRateArbitrage(StrategyV2Base):
         # 使用 connector_1 的价格计算仓位大小
         position_amount = self.config.position_size_quote / price_1
 
-        # 第一个交易所：使用限价单
+        # 第一个交易所：使用 Post Only 限价单
         position_executor_config_1 = PositionExecutorConfig(
             timestamp=self.current_timestamp,
             connector_name=connector_1,
@@ -355,24 +380,24 @@ class FundingRateArbitrage(StrategyV2Base):
             amount=position_amount,
             leverage=self.config.leverage,
             triple_barrier_config=TripleBarrierConfig(
-                open_order_type=OrderType.LIMIT,
-                early_stop_order_type=OrderType.LIMIT
-            ),  # 改为限价单
+                open_order_type=OrderType.LIMIT_MAKER,
+                early_stop_order_type=OrderType.LIMIT_MAKER
+            ),
         )
-        
-        # 第二个交易所：使用限价单
+
+        # 第二个交易所：使用 Post Only 限价单
         position_executor_config_2 = PositionExecutorConfig(
             timestamp=self.current_timestamp,
             connector_name=connector_2,
             trading_pair=self.get_trading_pair_for_connector(token, connector_2),
             side=TradeType.BUY if trade_side == TradeType.SELL else TradeType.SELL,
-            entry_price=price_2,  # 设置限价单价格
+            entry_price=price_2,
             amount=position_amount,
             leverage=self.config.leverage,
             triple_barrier_config=TripleBarrierConfig(
-                open_order_type=OrderType.LIMIT,
-                early_stop_order_type=OrderType.LIMIT
-            ),  # 改为限价单
+                open_order_type=OrderType.LIMIT_MAKER,
+                early_stop_order_type=OrderType.LIMIT_MAKER
+            ),
         )
         return position_executor_config_1, position_executor_config_2
 
@@ -388,7 +413,7 @@ class FundingRateArbitrage(StrategyV2Base):
                 funding_info_report = self.get_funding_info_by_token(token)
                 best_combination = self.get_most_profitable_combination(funding_info_report)
                 for connector_name, info in funding_info_report.items():
-                    token_info[f"{connector_name} Rate (%)"] = self.get_normalized_funding_rate_in_seconds(funding_info_report, connector_name) * self.funding_profitability_interval * 100
+                    token_info[f"{connector_name} Rate (%)"] = self.get_hourly_funding_rate(funding_info_report, connector_name) * self.funding_profitability_interval_hours * 100
                 connector_1, connector_2, side, funding_rate_diff = best_combination
                 profitability_after_fees = self.get_current_profitability_after_fees(token, connector_1, connector_2, side)
                 best_paths_info["Best Path"] = f"{connector_1}_{connector_2}"

@@ -52,42 +52,20 @@ class ParadexPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
 
         funding_event = response['results'][0]
 
-        funding_premium = Decimal(funding_event['funding_premium'])
-        funding_rate = Decimal(funding_event['funding_rate'])
-        oracle_price = funding_premium / funding_rate
-        mark_price = funding_premium + oracle_price
+        # Use the normalized 8-hour funding rate from the API.
+        # The raw 'funding_rate' may differ if the actual funding period != 8h.
+        funding_rate_8h = Decimal(str(
+            funding_event.get('funding_rate_8h', funding_event.get('funding_rate', '0'))
+        ))
 
         funding_info = FundingInfo(
             trading_pair=trading_pair,
-            index_price=oracle_price,
-            mark_price=mark_price,
+            index_price=Decimal(0),
+            mark_price=Decimal(0),
             next_funding_utc_timestamp=self._next_funding_time(),
-            rate=funding_rate,
+            rate=funding_rate_8h,
         )
         return funding_info
-
-    async def listen_for_funding_info(self, output: asyncio.Queue):
-        """
-        Reads the funding info events queue and updates the local funding info information.
-        """
-        while True:
-            try:
-                for trading_pair in self._trading_pairs:
-                    funding_info = await self.get_funding_info(trading_pair)
-                    funding_info_update = FundingInfoUpdate(
-                        trading_pair=trading_pair,
-                        index_price=funding_info.index_price,
-                        mark_price=funding_info.mark_price,
-                        next_funding_utc_timestamp=funding_info.next_funding_utc_timestamp,
-                        rate=funding_info.rate,
-                    )
-                    output.put_nowait(funding_info_update)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                self.logger().exception("Unexpected error when processing public funding info updates from exchange")
-            finally:
-                await asyncio.sleep(CONSTANTS.FUNDING_RATE_UPDATE_INTERNAL_SECOND)
 
     async def _request_order_book_snapshot(self, trading_pair: str) -> Dict[str, Any]:
         ex_trading_pair = await self._connector.exchange_symbol_associated_to_pair(trading_pair=trading_pair)
@@ -145,7 +123,16 @@ class ParadexPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
                 self.logger().info(f"Subscribing to {order_book_payload}")
                 await ws.send(subscribe_orderbook_request)
 
-                self.logger().info("Subscribed to public order book, trade channels...")
+                funding_payload = {
+                    "id": int(time.time() * 1_000_000),
+                    "jsonrpc": "2.0",
+                    "method": "subscribe",
+                    "params": {"channel": CONSTANTS.FUNDING_DATA_ENDPOINT_NAME.format(market=symbol)},
+                }
+                subscribe_funding_request: WSJSONRequest = WSJSONRequest(payload=funding_payload)
+                await ws.send(subscribe_funding_request)
+
+                self.logger().info("Subscribed to public order book, trade, and funding data channels...")
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -162,6 +149,8 @@ class ParadexPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
                 channel = self._snapshot_messages_queue_key
             elif stream_name.startswith("trades."):
                 channel = self._trade_messages_queue_key
+            elif stream_name.startswith("funding_data."):
+                channel = self._funding_info_messages_queue_key
         return channel
 
     async def _parse_order_book_diff_message(self, raw_message: Dict[str, Any], message_queue: asyncio.Queue):
@@ -217,7 +206,20 @@ class ParadexPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
             self.logger().warning(f"Unknown trade type {trade_data['trade_type']}")
 
     async def _parse_funding_info_message(self, raw_message: Dict[str, Any], message_queue: asyncio.Queue):
-        return
+        data = raw_message["params"]["data"]
+        market = data["market"]
+        trading_pair = await self._connector.trading_pair_associated_to_exchange_symbol(market)
+        funding_rate_8h = Decimal(str(
+            data.get('funding_rate_8h', data.get('funding_rate', '0'))
+        ))
+        funding_info_update = FundingInfoUpdate(
+            trading_pair=trading_pair,
+            index_price=None,
+            mark_price=None,
+            next_funding_utc_timestamp=self._next_funding_time(),
+            rate=funding_rate_8h,
+        )
+        message_queue.put_nowait(funding_info_update)
 
     async def _request_complete_funding_info(self, trading_pair: str):
         ex_trading_pair = await self._connector.exchange_symbol_associated_to_pair(trading_pair=trading_pair)
