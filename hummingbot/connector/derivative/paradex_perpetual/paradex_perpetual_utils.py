@@ -1,7 +1,7 @@
 from decimal import Decimal
 from typing import Optional
 
-from pydantic import ConfigDict, Field, SecretStr
+from pydantic import ConfigDict, Field, SecretStr, field_validator
 
 from hummingbot.client.config.config_data_types import BaseConnectorConfigMap
 from hummingbot.core.data_type.trade_fee import TradeFeeSchema
@@ -25,6 +25,17 @@ def validate_bool(value: str) -> Optional[str]:
     valid_values = ('true', 'yes', 'y', 'false', 'no', 'n')
     if value.lower() not in valid_values:
         return f"Invalid value, please choose value from {valid_values}"
+
+
+def normalize_margin_type(value: Optional[str]) -> str:
+    if value is None:
+        return "Cross"
+    if not isinstance(value, str):
+        raise ValueError("Margin type must be a string: Cross or Isolated")
+    normalized = value.strip().lower()
+    if normalized not in {"cross", "isolated"}:
+        raise ValueError("Invalid margin type. Allowed values: Cross or Isolated")
+    return "Cross" if normalized == "cross" else "Isolated"
 
 
 class ParadexPerpetualConfigMap(BaseConnectorConfigMap):
@@ -65,6 +76,21 @@ class ParadexPerpetualConfigMap(BaseConnectorConfigMap):
             "prompt_on_new": True,
         }
     )
+
+    paradex_perpetual_margin_type: str = Field(
+        default="Cross",
+        json_schema_extra={
+            "prompt": "Enter margin type (Cross/Isolated)",
+            "is_secure": False,
+            "is_connect_key": True,
+            "prompt_on_new": True,
+        }
+    )
+
+    @field_validator("paradex_perpetual_margin_type", mode="before")
+    @classmethod
+    def validate_margin_type(cls, value):
+        return normalize_margin_type(value)
 
 
 KEYS = ParadexPerpetualConfigMap.model_construct()
@@ -115,6 +141,21 @@ class ParadexPerpetualTestnetConfigMap(BaseConnectorConfigMap):
             "prompt_on_new": True,
         }
     )
+
+    paradex_perpetual_margin_type: str = Field(
+        default="Cross",
+        json_schema_extra={
+            "prompt": "Enter margin type (Cross/Isolated)",
+            "is_secure": False,
+            "is_connect_key": True,
+            "prompt_on_new": True,
+        }
+    )
+
+    @field_validator("paradex_perpetual_margin_type", mode="before")
+    @classmethod
+    def validate_margin_type(cls, value):
+        return normalize_margin_type(value)
     model_config = ConfigDict(title="paradex_perpetual")
 
 

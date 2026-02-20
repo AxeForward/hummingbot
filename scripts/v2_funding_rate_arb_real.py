@@ -1,4 +1,5 @@
 import os
+import time
 from decimal import Decimal
 from typing import Dict, List, Optional, Set
 
@@ -111,6 +112,7 @@ class FundingRateArbitrage(StrategyV2Base):
         self.config = config
         self.active_funding_arbitrages = {}
         self.stopped_funding_arbitrages = {token: [] for token in self.config.tokens} if config else {}
+        self._last_margin_warning_ts: Dict[str, float] = {}
 
     def start(self, clock: Clock, timestamp: float) -> None:
         """
@@ -251,13 +253,22 @@ class FundingRateArbitrage(StrategyV2Base):
             reserved_margin = reserved_by_connector.get(connector_name, Decimal("0"))
             free_margin = available_balance - reserved_margin
             if free_margin < required_margin:
-                self.logger().warning(
-                    f"Skipping new arbitrage due to insufficient margin on {connector_name}: "
-                    f"available={available_balance} {quote_asset}, reserved={reserved_margin} {quote_asset}, "
-                    f"required={required_margin} {quote_asset}."
+                self._log_margin_warning(
+                    connector_name=connector_name,
+                    message=(
+                        f"Skipping new arbitrage due to insufficient margin on {connector_name}: "
+                        f"available={available_balance} {quote_asset}, reserved={reserved_margin} {quote_asset}, "
+                        f"required={required_margin} {quote_asset}."
+                    ),
                 )
                 return False
         return True
+
+    def _log_margin_warning(self, connector_name: str, message: str, cooldown_seconds: int = 30):
+        now = time.time()
+        if now - self._last_margin_warning_ts.get(connector_name, 0) >= cooldown_seconds:
+            self._last_margin_warning_ts[connector_name] = now
+            self.logger().warning(message)
 
     def create_actions_proposal(self) -> List[CreateExecutorAction]:
         """
@@ -441,7 +452,8 @@ class FundingRateArbitrage(StrategyV2Base):
         )
         
         # 使用 connector_1 的价格计算仓位大小
-        position_amount = self.config.position_size_quote / price_1
+        position_amount_1 = self.config.position_size_quote / price_1
+        position_amount_2 = self.config.position_size_quote / price_2
 
         # 第一个交易所：使用 Post Only 限价单
         position_executor_config_1 = PositionExecutorConfig(
@@ -450,7 +462,7 @@ class FundingRateArbitrage(StrategyV2Base):
             trading_pair=self.get_trading_pair_for_connector(token, connector_1),
             side=trade_side,
             entry_price=price_1,  # 设置限价单价格
-            amount=position_amount,
+            amount=position_amount_1,
             leverage=self.config.leverage,
             triple_barrier_config=TripleBarrierConfig(
                 open_order_type=OrderType.LIMIT_MAKER,
@@ -465,7 +477,7 @@ class FundingRateArbitrage(StrategyV2Base):
             trading_pair=self.get_trading_pair_for_connector(token, connector_2),
             side=TradeType.BUY if trade_side == TradeType.SELL else TradeType.SELL,
             entry_price=price_2,
-            amount=position_amount,
+            amount=position_amount_2,
             leverage=self.config.leverage,
             triple_barrier_config=TripleBarrierConfig(
                 open_order_type=OrderType.LIMIT_MAKER,

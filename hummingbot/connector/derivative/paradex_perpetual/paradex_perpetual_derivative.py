@@ -53,6 +53,9 @@ class ParadexPerpetualDerivative(PerpetualDerivativePyBase):
     SHORT_POLL_INTERVAL = 5.0
     LONG_POLL_INTERVAL = 12.0
 
+    SUPPORTED_MARGIN_TYPES = {"CROSS", "ISOLATED"}
+    DEFAULT_MARGIN_TYPE = "CROSS"
+
     def __init__(
             self,
             balance_asset_limit: Optional[Dict[str, Dict[str, Decimal]]] = None,
@@ -60,6 +63,7 @@ class ParadexPerpetualDerivative(PerpetualDerivativePyBase):
             paradex_perpetual_is_testnet: bool = False,
             paradex_perpetual_l1_private_key: Optional[str] = None,
             paradex_perpetual_l2_private_key: Optional[str] = None,
+            paradex_perpetual_margin_type: str = "Cross",
             trading_pairs: Optional[List[str]] = None,
             trading_required: bool = True,
             domain: str = CONSTANTS.DOMAIN,
@@ -68,6 +72,7 @@ class ParadexPerpetualDerivative(PerpetualDerivativePyBase):
         self.paradex_perpetual_is_testnet = paradex_perpetual_is_testnet
         self.paradex_perpetual_l1_private_key = paradex_perpetual_l1_private_key
         self.paradex_perpetual_l2_private_key = paradex_perpetual_l2_private_key
+        self.paradex_perpetual_margin_type = self._normalize_margin_type(paradex_perpetual_margin_type)
         self._trading_required = trading_required
         self._trading_pairs = trading_pairs
         self._domain = domain
@@ -173,6 +178,14 @@ class ParadexPerpetualDerivative(PerpetualDerivativePyBase):
 
     def _is_order_not_found_during_cancelation_error(self, cancelation_exception: Exception) -> bool:
         return CONSTANTS.UNKNOWN_ORDER_MESSAGE in str(cancelation_exception)
+
+    def _normalize_margin_type(self, margin_type: Optional[str]) -> str:
+        if margin_type is None:
+            return self.DEFAULT_MARGIN_TYPE
+        normalized = str(margin_type).strip().upper()
+        if normalized not in self.SUPPORTED_MARGIN_TYPES:
+            raise ValueError("Invalid paradex_perpetual_margin_type. Allowed values: Cross or Isolated")
+        return normalized
 
     async def _update_trading_rules(self):
         exchange_info = await self._api_get(path_url=self.trading_rules_request_path,
@@ -796,10 +809,20 @@ class ParadexPerpetualDerivative(PerpetualDerivativePyBase):
         return success, msg
 
     async def _set_trading_pair_leverage(self, trading_pair: str, leverage: int) -> Tuple[bool, str]:
-        # TODO
-        msg = "Leverage setting is not supported by Paradex."
-        success = True
-        return success, msg
+        if leverage <= 0:
+            return False, f"Invalid leverage {leverage}. Leverage must be > 0."
+
+        exchange_symbol = await self.exchange_symbol_associated_to_pair(trading_pair)
+        try:
+            await self._api_post(
+                path_url=CONSTANTS.ACCOUNT_MARGIN_URL.format(market=exchange_symbol),
+                data={"leverage": leverage, "margin_type": self.paradex_perpetual_margin_type},
+                limit_id=CONSTANTS.ACCOUNT_MARGIN_URL,
+                is_auth_required=True,
+            )
+            return True, ""
+        except Exception as e:
+            return False, f"Failed to set leverage for {exchange_symbol} to {leverage}: {e}"
 
     async def _fetch_last_fee_payment(self, trading_pair: str) -> Tuple[int, Decimal, Decimal]:
         exchange_symbol = await self.exchange_symbol_associated_to_pair(trading_pair)
@@ -834,3 +857,4 @@ class ParadexPerpetualDerivative(PerpetualDerivativePyBase):
         Funding settlement occurs every trade? Using the 5 seconds refresh rate here
         """
         return int(time.time() - 5)
+

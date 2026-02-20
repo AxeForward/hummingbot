@@ -75,7 +75,7 @@ class ParadexPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
         }
 
         auth_id_req = WSJSONRequest(payload=auth_payload)
-        self.logger().info(f"Subscribing to {auth_payload}")
+        self.logger().debug(f"Subscribing to {auth_payload}")
         await ws.send(auth_id_req)
 
         return ws
@@ -100,36 +100,25 @@ class ParadexPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
                     payload=orders_change_payload,
                     is_auth_required=True)
                 
-                self.logger().info(f"Subscribing to {orders_change_payload}")
+                self.logger().debug(f"Subscribing to {orders_change_payload}")
                 await websocket_assistant.send(subscribe_order_change_request)
 
-            trades_payload = {
-                "id": int(time.time() * 1_000_000),
-                "jsonrpc": "2.0",
-                "method": "subscribe",
-                "params": {"channel": CONSTANTS.USER_TRADES_ENDPOINT_NAME.format(market=symbol)},
-            }
-
-            subscribe_trades_request: WSJSONRequest = WSJSONRequest(
-                payload=trades_payload,
-                is_auth_required=True)
-            
-            self.logger().info(f"Subscribing to {trades_payload}")
-            await websocket_assistant.send(subscribe_trades_request)
-
-            fills_payload = {
-                "id": int(time.time() * 1_000_000),
-                "jsonrpc": "2.0",
-                "method": "subscribe",
-                "params": {"channel": CONSTANTS.USER_FILLS_ENDPOINT_NAME.format(market=symbol)},
-            }
-
-            subscribe_fills_request: WSJSONRequest = WSJSONRequest(
-                payload=fills_payload,
-                is_auth_required=True)
-            
-            self.logger().info(f"Subscribing to {fills_payload}")
-            await websocket_assistant.send(subscribe_fills_request)
+                unique_private_channels = {
+                    CONSTANTS.USER_TRADES_ENDPOINT_NAME.format(market=symbol),
+                    CONSTANTS.USER_FILLS_ENDPOINT_NAME.format(market=symbol),
+                }
+                for channel in unique_private_channels:
+                    payload = {
+                        "id": int(time.time() * 1_000_000),
+                        "jsonrpc": "2.0",
+                        "method": "subscribe",
+                        "params": {"channel": channel},
+                    }
+                    subscribe_request: WSJSONRequest = WSJSONRequest(
+                        payload=payload,
+                        is_auth_required=True)
+                    self.logger().debug(f"Subscribing to {payload}")
+                    await websocket_assistant.send(subscribe_request)
 
             positions_payload = {
                 "id": int(time.time() * 1_000_000),
@@ -142,10 +131,10 @@ class ParadexPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
                 payload=positions_payload,
                 is_auth_required=True)
             
-            self.logger().info(f"Subscribing to {positions_payload}")
+            self.logger().debug(f"Subscribing to {positions_payload}")
             await websocket_assistant.send(subscribe_positions_request)
 
-            self.logger().info("Subscribed to private order and trades changes channels...")
+            self.logger().debug("Subscribed to private order and trades changes channels...")
         except asyncio.CancelledError:
             raise
         except Exception:

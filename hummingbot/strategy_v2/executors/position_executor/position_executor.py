@@ -366,7 +366,19 @@ class PositionExecutor(ExecutorBase):
                 self._failed_orders.append(self._close_order)
                 self._close_order = None
         else:
-            self.place_close_order_and_cancel_open_orders(close_type=self.close_type)
+            try:
+                self.place_close_order_and_cancel_open_orders(close_type=self.close_type)
+            except ValueError as e:
+                # Strategy may have been stopped and markets already removed from whitelist.
+                if "whitelisted markets set" in str(e):
+                    self.logger().warning(
+                        f"Close order skipped because market is no longer whitelisted: {e}. "
+                        f"Terminating executor {self.config.id}."
+                    )
+                    self.close_type = CloseType.FAILED
+                    self.stop()
+                    return
+                raise
 
     def evaluate_max_retries(self):
         """
@@ -692,6 +704,15 @@ class PositionExecutor(ExecutorBase):
         elif self._close_order and event.order_id == self._close_order.order_id:
             self._failed_orders.append(self._close_order)
             self._close_order = None
+            error_message = str(getattr(event, "error_message", "") or "")
+            if "Reduce only order would increase position" in error_message:
+                self.logger().warning(
+                    f"Close order {event.order_id} rejected as reduce-only without open position. "
+                    f"Marking executor {self.config.id} as completed."
+                )
+                self.close_type = CloseType.COMPLETED
+                self.stop()
+                return
             self.logger().error(f"Close order failed {event.order_id}. Retrying {self._current_retries}/{self._max_retries}")
             self._current_retries += 1
         elif self._take_profit_limit_order and event.order_id == self._take_profit_limit_order.order_id:

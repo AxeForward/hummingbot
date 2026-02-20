@@ -119,9 +119,9 @@ class ParadexPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
                 }
                 subscribe_orderbook_request: WSJSONRequest = WSJSONRequest(payload=order_book_payload)
 
-                self.logger().info(f"Subscribing to {trades_payload}")
+                self.logger().debug(f"Subscribing to {trades_payload}")
                 await ws.send(subscribe_trade_request)
-                self.logger().info(f"Subscribing to {order_book_payload}")
+                self.logger().debug(f"Subscribing to {order_book_payload}")
                 await ws.send(subscribe_orderbook_request)
 
                 funding_payload = {
@@ -133,7 +133,7 @@ class ParadexPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
                 subscribe_funding_request: WSJSONRequest = WSJSONRequest(payload=funding_payload)
                 await ws.send(subscribe_funding_request)
 
-                self.logger().info("Subscribed to public order book, trade, and funding data channels...")
+                self.logger().debug("Subscribed to public order book, trade, and funding data channels...")
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -204,7 +204,7 @@ class ParadexPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
 
             message_queue.put_nowait(trade_message)
         else:
-            self.logger().warning(f"Unknown trade type {trade_data['trade_type']}")
+            self.logger().debug(f"Unknown trade type {trade_data['trade_type']}")
 
     async def _parse_funding_info_message(self, raw_message: Dict[str, Any], message_queue: asyncio.Queue):
         data = raw_message["params"]["data"]

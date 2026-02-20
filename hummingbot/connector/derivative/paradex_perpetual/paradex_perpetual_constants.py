@@ -22,6 +22,7 @@ CURRENCY = "USDC"
 AVAILABLE_MARKETS_URL = "/markets"
 MARKETS_SUMMARY_URL = "/markets/summary"
 ACCOUNT_INFO_URL = "/account"
+ACCOUNT_MARGIN_URL = "/account/margin/{market}"
 BALANCES_INFO_URL = "/balance"
 PING_URL = "/system/state"
 GET_LAST_FUNDING_RATE_PATH_URL = "/funding/data"
@@ -89,6 +90,8 @@ RATE_LIMITS = [
               linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT)]),
     RateLimit(limit_id=ACCOUNT_INFO_URL, limit=ALL_MAX_REQUEST, time_interval=ALL_LIMIT_TIME_INTERVAL,
               linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT)]),
+    RateLimit(limit_id=ACCOUNT_MARGIN_URL, limit=ALL_MAX_REQUEST, time_interval=ALL_LIMIT_TIME_INTERVAL,
+              linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT)]),
     RateLimit(limit_id=POSITION_INFORMATION_URL, limit=ALL_MAX_REQUEST, time_interval=ALL_LIMIT_TIME_INTERVAL,
               linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT)]),
     RateLimit(limit_id=GET_LAST_FUNDING_RATE_PATH_URL, limit=ALL_MAX_REQUEST, time_interval=ALL_LIMIT_TIME_INTERVAL,
@@ -99,3 +102,4 @@ RATE_LIMITS = [
 ]
 ORDER_NOT_EXIST_MESSAGE = "CLIENT_ORDER_ID_NOT_FOUND"
 UNKNOWN_ORDER_MESSAGE = "CLIENT_ORDER_ID_NOT_FOUND"
+
