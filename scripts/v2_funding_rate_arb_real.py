@@ -9,7 +9,7 @@ from pydantic import Field, field_validator
 from hummingbot.client.ui.interface_utils import format_df_for_printout
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.core.clock import Clock
-from hummingbot.core.data_type.common import OrderType, PositionAction, PositionMode, PriceType, TradeType
+from hummingbot.core.data_type.common import OrderType, PositionAction, PositionMode, PositionSide, PriceType, TradeType
 from hummingbot.core.event.events import FundingPaymentCompletedEvent
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from hummingbot.strategy.strategy_v2_base import StrategyV2Base, StrategyV2ConfigBase
@@ -113,6 +113,8 @@ class FundingRateArbitrage(StrategyV2Base):
         self.active_funding_arbitrages = {}
         self.stopped_funding_arbitrages = {token: [] for token in self.config.tokens} if config else {}
         self._last_margin_warning_ts: Dict[str, float] = {}
+        self._last_exposure_warning_ts: Dict[str, float] = {}
+        self._force_close_initiated_tokens: Set[str] = set()
 
     def start(self, clock: Clock, timestamp: float) -> None:
         """
@@ -130,6 +132,10 @@ class FundingRateArbitrage(StrategyV2Base):
                 if hasattr(executor.config, "triple_barrier_config") and executor.config.triple_barrier_config:
                     executor.config.triple_barrier_config.early_stop_order_type = OrderType.MARKET
         await super().on_stop()
+        # Hard fallback: cancel stale open orders and close residual positions by market.
+        for token in self.config.tokens:
+            self._cancel_open_orders_for_token(token)
+            self._force_close_token_positions(token, reason="strategy stop fallback", force=True)
 
     ONEWAY_ONLY_CONNECTORS = {"hyperliquid_perpetual", "paradex_perpetual"}
 
@@ -270,6 +276,62 @@ class FundingRateArbitrage(StrategyV2Base):
             self._last_margin_warning_ts[connector_name] = now
             self.logger().warning(message)
 
+
+    def _log_exposure_warning(self, token: str, message: str, cooldown_seconds: int = 15):
+        now = time.time()
+        if now - self._last_exposure_warning_ts.get(token, 0) >= cooldown_seconds:
+            self._last_exposure_warning_ts[token] = now
+            self.logger().warning(message)
+
+    def _has_open_orders_for_token(self, token: str) -> bool:
+        for connector_name in self.config.connectors:
+            token_pair = self.get_trading_pair_for_connector(token, connector_name)
+            for order in self.get_active_orders(connector_name):
+                if order.trading_pair == token_pair:
+                    return True
+        return False
+
+    def _get_open_positions_for_token(self, token: str):
+        open_positions = []
+        for connector_name in self.config.connectors:
+            connector = self.connectors[connector_name]
+            token_pair = self.get_trading_pair_for_connector(token, connector_name)
+            for position in connector.account_positions.values():
+                if position.trading_pair == token_pair and abs(position.amount) > Decimal("0"):
+                    open_positions.append((connector_name, token_pair, position))
+        return open_positions
+
+    def _has_open_positions_for_token(self, token: str) -> bool:
+        return len(self._get_open_positions_for_token(token)) > 0
+
+    def _token_has_live_exposure(self, token: str) -> bool:
+        return self._has_open_orders_for_token(token) or self._has_open_positions_for_token(token)
+
+    def _cancel_open_orders_for_token(self, token: str):
+        for connector_name in self.config.connectors:
+            token_pair = self.get_trading_pair_for_connector(token, connector_name)
+            for order in self.get_active_orders(connector_name):
+                if order.trading_pair == token_pair:
+                    self.cancel(connector_name, token_pair, order.client_order_id)
+
+    def _force_close_token_positions(self, token: str, reason: str, force: bool = False):
+        open_positions = self._get_open_positions_for_token(token)
+        if len(open_positions) == 0:
+            self._force_close_initiated_tokens.discard(token)
+            return
+
+        if not force and token in self._force_close_initiated_tokens:
+            return
+
+        self._force_close_initiated_tokens.add(token)
+        self.logger().warning(f"Force-closing residual positions for {token}: {reason}")
+        for connector_name, trading_pair, position in open_positions:
+            amount = abs(position.amount)
+            if position.position_side == PositionSide.LONG:
+                self.sell(connector_name, trading_pair, amount, OrderType.MARKET, position_action=PositionAction.CLOSE)
+            else:
+                self.buy(connector_name, trading_pair, amount, OrderType.MARKET, position_action=PositionAction.CLOSE)
+
     def create_actions_proposal(self) -> List[CreateExecutorAction]:
         """
         In this method we are going to evaluate if a new set of positions has to be created for each of the tokens that
@@ -292,68 +354,80 @@ class FundingRateArbitrage(StrategyV2Base):
 
         reserved_margin_by_connector = self._reserved_margin_by_connector()
 
+        # Step 1: Collect candidate tokens (not locked) and compute their best combinations.
+        candidates = []
         for token in self.config.tokens:
-            if token not in self.active_funding_arbitrages:
-                funding_info_report = self.get_funding_info_by_token(token)
-                best_combination = self.get_most_profitable_combination(funding_info_report)
-                if best_combination is None:
+            if token in self.active_funding_arbitrages:
+                continue
+            if self._token_has_live_exposure(token):
+                self._log_exposure_warning(token, f"Skipping {token}: live exposure detected (open order/position).")
+                continue
+            funding_info_report = self.get_funding_info_by_token(token)
+            best_combination = self.get_most_profitable_combination(funding_info_report)
+            if best_combination is None:
+                continue
+            connector_1, connector_2, trade_side, expected_profitability = best_combination
+            candidates.append((token, funding_info_report, connector_1, connector_2, trade_side, expected_profitability))
+
+        # Step 2: Sort candidates by funding rate spread absolute value (descending).
+        candidates.sort(key=lambda x: x[5], reverse=True)
+
+        # Step 3: Process in sorted order; open the first valid arbitrage found.
+        for token, funding_info_report, connector_1, connector_2, trade_side, expected_profitability in candidates:
+            # Sanity check: funding rate profitability should be a reasonable value (< 100%)
+            if expected_profitability > Decimal("1"):
+                self.logger().warning(
+                    f"Funding rate profitability for {token} is {expected_profitability} "
+                    f"(>100%), likely a data error. Skipping...")
+                continue
+
+            if expected_profitability >= self.config.min_funding_rate_profitability:
+                if not self._has_sufficient_margin_for_pair(
+                        connector_1=connector_1,
+                        connector_2=connector_2,
+                        reserved_by_connector=reserved_margin_by_connector):
                     continue
-                connector_1, connector_2, trade_side, expected_profitability = best_combination
+                # Check Trading Rules and Min Notional
+                # Calculate estimated prices and amounts
+                trading_pair_1 = self.get_trading_pair_for_connector(token, connector_1)
+                trading_pair_2 = self.get_trading_pair_for_connector(token, connector_2)
+                price_1 = self.market_data_provider.get_price_by_type(connector_1, trading_pair_1, PriceType.MidPrice)
+                price_2 = self.market_data_provider.get_price_by_type(connector_2, trading_pair_2, PriceType.MidPrice)
+                amount_1 = self.config.position_size_quote / price_1
+                amount_2 = self.config.position_size_quote / price_2
 
-                # Sanity check: funding rate profitability should be a reasonable value (< 100%)
-                if expected_profitability > Decimal("1"):
-                    self.logger().warning(
-                        f"Funding rate profitability for {token} is {expected_profitability} "
-                        f"(>100%), likely a data error. Skipping...")
+                valid_1, msg_1 = self.validate_trading_rules(connector_1, trading_pair_1, amount_1, price_1)
+                valid_2, msg_2 = self.validate_trading_rules(connector_2, trading_pair_2, amount_2, price_2)
+
+                if not valid_1 or not valid_2:
+                    self.logger().warning(f"Skipping {token} arbitrage due to trading rules: "
+                                          f"{connector_1}: {msg_1} | {connector_2}: {msg_2}")
                     continue
 
-                if expected_profitability >= self.config.min_funding_rate_profitability:
-                    if not self._has_sufficient_margin_for_pair(
-                            connector_1=connector_1,
-                            connector_2=connector_2,
-                            reserved_by_connector=reserved_margin_by_connector):
+                current_profitability = self.get_current_profitability_after_fees(
+                    token, connector_1, connector_2, trade_side
+                )
+                if self.config.trade_profitability_condition_to_enter:
+                    if current_profitability < 0:
+                        self.logger().info(f"Best Combination: {connector_1} | {connector_2} | {trade_side}"
+                                           f"Funding rate profitability: {expected_profitability}"
+                                           f"Trading profitability after fees: {current_profitability}"
+                                           f"Trade profitability is negative, skipping...")
                         continue
-                    # Check Trading Rules and Min Notional
-                    # Calculate estimated prices and amounts
-                    trading_pair_1 = self.get_trading_pair_for_connector(token, connector_1)
-                    trading_pair_2 = self.get_trading_pair_for_connector(token, connector_2)
-                    price_1 = self.market_data_provider.get_price_by_type(connector_1, trading_pair_1, PriceType.MidPrice)
-                    price_2 = self.market_data_provider.get_price_by_type(connector_2, trading_pair_2, PriceType.MidPrice)
-                    amount_1 = self.config.position_size_quote / price_1
-                    amount_2 = self.config.position_size_quote / price_2
-
-                    valid_1, msg_1 = self.validate_trading_rules(connector_1, trading_pair_1, amount_1, price_1)
-                    valid_2, msg_2 = self.validate_trading_rules(connector_2, trading_pair_2, amount_2, price_2)
-
-                    if not valid_1 or not valid_2:
-                        self.logger().warning(f"Skipping {token} arbitrage due to trading rules: "
-                                              f"{connector_1}: {msg_1} | {connector_2}: {msg_2}")
-                        continue
-
-                    current_profitability = self.get_current_profitability_after_fees(
-                        token, connector_1, connector_2, trade_side
-                    )
-                    if self.config.trade_profitability_condition_to_enter:
-                        if current_profitability < 0:
-                            self.logger().info(f"Best Combination: {connector_1} | {connector_2} | {trade_side}"
-                                               f"Funding rate profitability: {expected_profitability}"
-                                               f"Trading profitability after fees: {current_profitability}"
-                                               f"Trade profitability is negative, skipping...")
-                            continue
-                    self.logger().info(f"Best Combination: {connector_1} | {connector_2} | {trade_side}"
-                                       f"Funding rate profitability: {expected_profitability}"
-                                       f"Trading profitability after fees: {current_profitability}"
-                                       f"Starting executors...")
-                    position_executor_config_1, position_executor_config_2 = self.get_position_executors_config(token, connector_1, connector_2, trade_side)
-                    self.active_funding_arbitrages[token] = {
-                        "connector_1": connector_1,
-                        "connector_2": connector_2,
-                        "executors_ids": [position_executor_config_1.id, position_executor_config_2.id],
-                        "side": trade_side,
-                        "funding_payments": [],
-                    }
-                    return [CreateExecutorAction(executor_config=position_executor_config_1),
-                            CreateExecutorAction(executor_config=position_executor_config_2)]
+                self.logger().info(f"Best Combination: {connector_1} | {connector_2} | {trade_side}"
+                                   f"Funding rate profitability: {expected_profitability}"
+                                   f"Trading profitability after fees: {current_profitability}"
+                                   f"Starting executors...")
+                position_executor_config_1, position_executor_config_2 = self.get_position_executors_config(token, connector_1, connector_2, trade_side)
+                self.active_funding_arbitrages[token] = {
+                    "connector_1": connector_1,
+                    "connector_2": connector_2,
+                    "executors_ids": [position_executor_config_1.id, position_executor_config_2.id],
+                    "side": trade_side,
+                    "funding_payments": [],
+                }
+                return [CreateExecutorAction(executor_config=position_executor_config_1),
+                        CreateExecutorAction(executor_config=position_executor_config_2)]
         return create_actions
 
     def stop_actions_proposal(self) -> List[StopExecutorAction]:
@@ -370,9 +444,15 @@ class FundingRateArbitrage(StrategyV2Base):
                 filter_func=lambda x: x.id in funding_arbitrage_info["executors_ids"]
             )
 
-            # Cleanup guard: once all legs are done, release token lock so a new cycle can start.
+            # Cleanup guard: only unlock token when executors are done AND real exposure is flat.
             if len(executors) > 0 and all(executor.is_done for executor in executors):
+                if self._token_has_live_exposure(token):
+                    self._log_exposure_warning(token, f"Executors done but {token} still has live exposure; keeping lock and forcing close.")
+                    self._cancel_open_orders_for_token(token)
+                    self._force_close_token_positions(token, reason="executors finished but exposure remains")
+                    continue
                 tokens_to_remove.append(token)
+                self._force_close_initiated_tokens.discard(token)
                 continue
 
             failed_executors = self.filter_executors(
@@ -385,6 +465,8 @@ class FundingRateArbitrage(StrategyV2Base):
                     f"Stopping all active legs for this token to avoid single-leg exposure."
                 )
                 self.stopped_funding_arbitrages[token].append(funding_arbitrage_info)
+                self._cancel_open_orders_for_token(token)
+                self._force_close_token_positions(token, reason="failed leg detected")
                 stop_executor_actions.extend(
                     [StopExecutorAction(executor_id=executor.id) for executor in executors if not executor.is_done]
                 )
@@ -425,8 +507,12 @@ class FundingRateArbitrage(StrategyV2Base):
                 self.stopped_funding_arbitrages[token].append(funding_arbitrage_info)
                 stop_executor_actions.extend([StopExecutorAction(executor_id=executor.id) for executor in executors])
         for token in tokens_to_remove:
+            if self._token_has_live_exposure(token):
+                self._log_exposure_warning(token, f"Skip unlocking {token}: residual exposure still detected.")
+                continue
             self.logger().info(f"Arbitrage cycle finished for {token}, unlocking token for future entries.")
             self.active_funding_arbitrages.pop(token, None)
+            self._force_close_initiated_tokens.discard(token)
         return stop_executor_actions
 
     def did_complete_funding_payment(self, funding_payment_completed_event: FundingPaymentCompletedEvent):
